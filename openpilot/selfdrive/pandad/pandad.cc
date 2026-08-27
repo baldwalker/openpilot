@@ -380,7 +380,7 @@ void pandad_run(Panda *panda) {
   std::thread send_thread(can_send_thread, panda, fake_send);
 
   RateKeeper rk("pandad", 100);
-  SubMaster sm({"selfdriveState", "deviceState", "selfdriveStateSP"});
+  SubMaster sm({"selfdriveState", "deviceState", "selfdriveStateSP", "carState"});
   PubMaster pm({"can", "pandaStates", "peripheralState"});
   PandaSafety panda_safety(panda);
   bool engaged = false;
@@ -407,7 +407,8 @@ void pandad_run(Panda *panda) {
       engaged_mads = process_mads_heartbeat(&sm);
       always_offroad = panda_safety.getOffroadMode();
       process_panda_state(panda, &pm, engaged, engaged_mads, is_onroad, spoofing_started, always_offroad);
-      panda_safety.configureSafetyMode(is_onroad);
+      const bool stock_cruise = sm.alive("carState") && sm["carState"].getCarState().getCruiseState().getEnabled();
+      panda_safety.configureSafetyMode(is_onroad, stock_cruise);
     }
 
     // Send out peripheralState at 2Hz

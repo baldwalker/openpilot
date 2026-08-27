@@ -18,7 +18,7 @@ from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-from openpilot.selfdrive.selfdrived.events import Events, ET
+from openpilot.selfdrive.selfdrived.events import EVENTS, Events, ET
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -135,6 +135,8 @@ class SelfdriveD(CruiseHelper):
     self.active = False
     self.mismatch_counter = 0
     self.cruise_mismatch_counter = 0
+    self.safety_matched_frame = {}
+    self.handoff_ready_prev = None
     self.last_steering_pressed_frame = 0
     self.distance_traveled = 0
     self.last_functional_fan_frame = 0
@@ -385,8 +387,16 @@ class SelfdriveD(CruiseHelper):
       else:
         safety_mismatch = pandaState.safetyModel not in IGNORED_SAFETY_MODES
 
+      # rx checks start cold on a safety mode switch and the 1Hz safety_tick can report
+      # them invalid for up to a tick before revalidation, so give them time to settle
+      if safety_mismatch:
+        self.safety_matched_frame[i] = None
+      elif self.safety_matched_frame.get(i) is None:
+        self.safety_matched_frame[i] = self.sm.frame
+      rx_settling = not self.enabled and (self.safety_matched_frame[i] is None or (self.sm.frame - self.safety_matched_frame[i]) * DT_CTRL < 2.5)
+
       # safety mismatch allows some time for pandad to set the safety mode and publish it back from panda
-      if (safety_mismatch and self.sm.frame*DT_CTRL > 10.) or pandaState.safetyRxChecksInvalid or self.mismatch_counter >= 200:
+      if (safety_mismatch and (self.sm.frame*DT_CTRL > 10. or CS.cruiseState.enabled)) or (pandaState.safetyRxChecksInvalid and not rx_settling) or self.mismatch_counter >= 200:
         self.events.add(EventName.controlsMismatch)
 
       if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
@@ -597,6 +607,14 @@ class SelfdriveD(CruiseHelper):
     ss.active = self.active
     ss.state = self.state_machine.state
     ss.engageable = not self.events.contains(ET.NO_ENTRY)
+
+    # readiness for the panda relay handoff: like engageable, but a pre-handoff
+    # safety mode mismatch must not hold up the handoff that would resolve it
+    handoff_ready = self.initialized and not any(ET.NO_ENTRY in EVENTS.get(e, {}) and e != EventName.controlsMismatch
+                                                 for e in self.events.names)
+    if handoff_ready != self.handoff_ready_prev:
+      self.params.put_bool("RelayHandoffReady", handoff_ready)
+      self.handoff_ready_prev = handoff_ready
     ss.experimentalMode = self.experimental_mode
     ss.personality = self.personality
 

@@ -2,12 +2,21 @@
 #include "openpilot/cereal/messaging/messaging.h"
 #include "common/swaglog.h"
 
-void PandaSafety::configureSafetyMode(bool is_onroad) {
+void PandaSafety::configureSafetyMode(bool is_onroad, bool stock_cruise) {
   if (is_onroad && !safety_configured_) {
     updateMultiplexingMode();
 
     auto car_params = fetchCarParams();
     if (!car_params.empty()) {
+      // on Rivian, opening the relay cuts the stock ACM off from the car, so hold the
+      // handoff until openpilot can actually engage and stock ACC isn't in use
+      if (waitingForReady(car_params[0], stock_cruise)) {
+        if (!wait_logged_) {
+          LOGW("Waiting for openpilot to be engageable before setting safety model");
+          wait_logged_ = true;
+        }
+        return;
+      }
       LOGW("got %lu bytes CarParams", car_params[0].size());
       LOGW("got %lu bytes CarParamsSP", car_params[1].size());
       setSafetyMode(car_params);
@@ -17,6 +26,7 @@ void PandaSafety::configureSafetyMode(bool is_onroad) {
     initialized_ = false;
     safety_configured_ = false;
     log_once_ = false;
+    wait_logged_ = false;
   }
 }
 
@@ -53,6 +63,16 @@ std::vector<std::string> PandaSafety::fetchCarParams() {
     return {};
   }
   return {params_.get("CarParams"), params_.get("CarParamsSP")};
+}
+
+bool PandaSafety::waitingForReady(const std::string &params_string, bool stock_cruise) {
+  AlignedBuffer aligned_buf;
+  capnp::FlatArrayMessageReader cmsg(aligned_buf.align(params_string.data(), params_string.size()));
+  cereal::CarParams::Reader car_params = cmsg.getRoot<cereal::CarParams>();
+  if (car_params.getSafetyConfigs()[0].getSafetyModel() != cereal::CarParams::SafetyModel::RIVIAN) {
+    return false;
+  }
+  return stock_cruise || !params_.getBool("RelayHandoffReady");
 }
 
 // TODO-SP: Use structs instead of vector
